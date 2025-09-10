@@ -1,5 +1,7 @@
 import io
 import os
+from pathlib import Path
+import tempfile
 import zipfile
 import base64
 import smtplib
@@ -36,15 +38,14 @@ def build_submission_zip(answers: dict, attachments: Iterable[dict]) -> bytes:
 
 
 def save_zip_local(content: bytes, tenant_id: str, package_id: str) -> str:
-    """
-    Save the ZIP bytes to ./out/<tenant_id>/<package_id>.zip and return the absolute path.
-    """
-    outdir = os.path.abspath(os.path.join(".", "out", tenant_id))
-    os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, f"{package_id}.zip")
-    with open(path, "wb") as f:
-        f.write(content)
-    return path
+    # Use SUBMISSION_DIR if set, else default temp
+    base = os.getenv("SUBMISSION_DIR") or tempfile.gettempdir()
+    out_dir = Path(base) / tenant_id   # optional: keep tenant subfolder
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    out = out_dir / f"submission_{package_id}.zip"
+    out.write_bytes(content)
+    return f"local:{out}"
 
 
 def send_zip_via_email(smtp_host: str, smtp_port: int, sender: str, to: str, subject: str, content: bytes):
