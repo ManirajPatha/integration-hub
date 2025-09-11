@@ -1,5 +1,5 @@
 # connectors/d365/metadata.py
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 from urllib.parse import urlparse
 import json
 
@@ -51,16 +51,65 @@ async def find_tables(prefix: Optional[str] = None) -> List[Dict]:
 
     return out
 
+def _get_any(d: Dict, *keys: str):
+    """Return the first present (non-None) value among given keys, case-insensitive."""
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    # case-insensitive fallback
+    lower = {k.lower(): v for k, v in d.items()}
+    for k in keys:
+        v = lower.get(k.lower())
+        if v is not None:
+            return v
+    return None
+
 async def get_table(logical: str) -> Dict:
-    j = await d365_get(
-        f"/EntityDefinitions(LogicalName='{logical}')",
-        params={"$select": "LogicalName,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute"},
-    )
+    """
+    Robust variant: reuse the already-working paged list (find_tables)
+    and pick the matching logical name case-insensitively.
+    This avoids single-entity metadata quirks that return empty/null.
+    """
+    all_tables: List[Dict] = await find_tables()  # no prefix, get everything
+    lwr = logical.lower()
+    for t in all_tables:
+        if (t.get("logical") or "").lower() == lwr:
+            return t
+    # Not found -> return empty structure (caller can handle)
+    return {"logical": None, "set": None, "pk": None, "pname": None}
+
+async def read_table_rows_generic(
+    logical: str,
+    top: int = 50,
+    page_token: Optional[str] = None,   # accept nextLink from caller
+) -> Dict[str, Any]:
+    """
+    - Uses $top only (no $skip).
+    - If page_token (an @odata.nextLink) is provided, fetches that page directly.
+    - Returns items and next_page_token (if more pages available).
+    """
+    # If we have a nextLink, just call it directly
+    if page_token:
+        j = await d365_get(page_token, params=None)
+        return {
+            "items": j.get("value", []),
+            "next_page_token": j.get("@odata.nextLink")
+        }
+
+    # First page: resolve table metadata → build minimal $select
+    meta = await get_table(logical)  # {logical,set,pk,pname}
+    sel_cols = [meta["pk"]] if meta.get("pk") else []
+    if meta.get("pname"):
+        sel_cols.append(meta["pname"])
+
+    params = {"$top": str(top)}
+    if sel_cols:
+        params["$select"] = ",".join(sel_cols)
+
+    j = await d365_get(f"/{meta['set']}", params=params)
     return {
-        "logical": j.get("LogicalName"),
-        "set": j.get("EntitySetName"),
-        "pk": j.get("PrimaryIdAttribute"),
-        "pname": j.get("PrimaryNameAttribute"),
+        "items": j.get("value", []),
+        "next_page_token": j.get("@odata.nextLink")
     }
 
 # ---------- SIMPLE PER-TENANT REGISTRY (bring these back) ----------

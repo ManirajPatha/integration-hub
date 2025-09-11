@@ -128,3 +128,11 @@ def upload_zip_via_sftp(host: str, port: int, user: str, password: str, remote_p
         transport.close()
 
     return f"sftp://{host}{remote_path}"
+
+def save_bytes_local(content: bytes, tenant_id: str, filename: str) -> str:
+    base = os.getenv("SUBMISSION_DIR") or tempfile.gettempdir()
+    out_dir = Path(base) / tenant_id / "exports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / filename
+    out.write_bytes(content)
+    return f"local:{out}"

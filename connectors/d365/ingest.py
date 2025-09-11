@@ -162,7 +162,11 @@ async def poll_table(
     Persists a cursor on 'modifiedon' per (tenant, logical).
     """
     meta = await get_table(logical)  # uses EntityDefinitions(LogicalName='...')
-    set_name = meta["EntitySetName"]
+    # prefer normalized keys from get_table(); fall back to raw keys if present
+    set_name = meta.get("set") or meta.get("EntitySetName")
+    if not set_name:
+        raise RuntimeError(f"get_table('{logical}') returned no entity set name. Got: {meta}")
+
 
     # decide cursor
     stored = get_cursor(tenant, logical)
