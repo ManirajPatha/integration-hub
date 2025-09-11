@@ -1,4 +1,12 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Local outputs / exports
+out/
+*.zip
+*.log
+
+
 .env
+
