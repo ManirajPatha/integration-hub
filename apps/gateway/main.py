@@ -9,7 +9,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import json, os, time, tempfile, logging
 from dotenv import load_dotenv
 from common.cursors import list_cursors, reset_cursors, set_cursor
-from common.files import save_bytes_local, upload_zip_via_sftp
+from common.files import save_bytes_local, upload_zip_via_sftp, send_bytes_via_email
 from connectors.d365.metadata import find_tables, get_table, read_table_rows_generic
 from common.registry import get_tables, register_tables, set_tables
 from fastapi import Query
@@ -300,59 +300,55 @@ async def tables_register(tenant: str, body: dict = Body(...)):
     return {"ok": True, "tables": updated}
 
 @app.get("/tenants/{tenant_id}/connectors/d365/tables/{logical}/rows")
-async def rows(
-    tenant_id: str,
-    logical: str,
-    top: int = 50,
-    page_token: str | None = None,  # new
-):
-    res = await read_table_rows_generic(logical, top=top, page_token=page_token)
-    items = res.get("items", [])
-    next_token = res.get("next_page_token")
-    return {"ok": True, "count": len(items), "items": items, "next_page_token": next_token}
+async def rows(tenant_id: str, logical: str, request: Request, top: int = 100):
+    table = await get_table(logical)  # returns dict with 'set'
+    # Take all original query params from the client
+    params = dict(request.query_params)
 
-@app.post("/tenants/{tenant_id}/connectors/d365/tables/{logical}/export")
+    # Ensure $top applied (override or set)
+    params["$top"] = params.get("$top", str(top))
+
+    # If you previously forced just pk/pname, remove that code.
+    # DO NOT set your own $select here if the client provided one.
+
+    j = await d365_get(f"/{table['set']}", params=params)
+    return {
+        "ok": True,
+        "count": len(j.get("value", [])),
+        "items": j.get("value", []),
+        "next_page_token": j.get("@odata.nextLink")  # optional
+    }
+
+@app.get("/tenants/{tenant_id}/connectors/d365/tables/{logical}/export")
 async def export_table(
     tenant_id: str,
     logical: str,
-    format: Literal["json", "csv"] = Query("json"),
-    route: Literal["local", "email", "sftp"] = Query("local"), # type: ignore
-    select: Optional[str] = Query(None, description="Comma-separated columns to select"),
+    fmt: Literal["json", "csv"] = Query("json", alias="fmt"),
+    route: Literal["local", "email", "sftp"] = Query("local"),
+    select: Optional[str] = Query(None),
     top: int = Query(1000, ge=1, le=5000),
 ):
-    """
-    Export a D365 table as JSON or CSV.
-    - format: json|csv
-    - route: local|email|sftp (same delivery style as submissions)
-    - select: optional "$select" columns, e.g. "cr83d_emp_id,cr83d_name,createdon"
-    - top: max rows to fetch (simple single-page export)
-    """
-
-    # 1) Resolve entity set from logical name
+    # resolve entity set
     meta = await get_table(logical)
     set_name = meta["set"]
     if not set_name:
         raise HTTPException(status_code=404, detail=f"Unknown table: {logical}")
 
-    # 2) Fetch rows
+    # fetch rows
     params = {"$top": str(top)}
     if select:
         params["$select"] = select
     data = await d365_get(f"/{set_name}", params=params)
     rows = data.get("value", [])
 
-    # 3) Build file bytes
+    # build file
     ts = time.strftime("%Y%m%d_%H%M%S")
-    if format == "json":
+    if fmt == "json":
         content = json.dumps(rows, ensure_ascii=False, indent=2).encode("utf-8")
         filename = f"{logical}_{ts}.json"
         mime = ("application", "json")
     else:
-        # CSV: flatten dicts; ignore OData metadata keys
-        if rows:
-            fieldnames = sorted({k for r in rows for k in r.keys() if not k.startswith("@")})
-        else:
-            fieldnames = []
+        fieldnames = sorted({k for r in rows for k in r.keys() if not k.startswith("@")}) if rows else []
         sio = io.StringIO(newline="")
         writer = csv.DictWriter(sio, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
@@ -362,28 +358,29 @@ async def export_table(
         filename = f"{logical}_{ts}.csv"
         mime = ("text", "csv")
 
-    # 4) Deliver: local / email / sftp
+    # deliver
     if route == "local":
         location = save_bytes_local(content, tenant_id, filename)
     elif route == "email":
-        host = os.getenv("SMTP_HOST", "localhost")
-        port = int(os.getenv("SMTP_PORT", "1025"))
-        sender = os.getenv("SMTP_SENDER", "noreply@example.com")
-        to = os.getenv("SUBMIT_EMAIL_TO", "demo@example.com")
-        subject = f"D365 Export {logical} ({ts})"
-        location = send_bytes_via_email(host, port, sender, to, subject, filename, content, *mime) # type: ignore
-    else:  # sftp
-        host = os.getenv("SFTP_HOST", "localhost")
-        port = int(os.getenv("SFTP_PORT", "22"))
-        user = os.getenv("SFTP_USER", "user")
-        password = os.getenv("SFTP_PASSWORD", "pass")
-        remote_path = f"/inbound/{tenant_id}/exports/{filename}"
-        # Reuse upload_zip_via_sftp for any bytes: quick adaptation:
-        # Wrap in-memory content as a "file"; paramiko write works the same
-        # so we can call a small sibling function OR inline here:
-        location = upload_zip_via_sftp(host, port, user, password, remote_path, content)
+        location = send_bytes_via_email(
+            os.getenv("SMTP_HOST","localhost"),
+            int(os.getenv("SMTP_PORT","1025")),
+            os.getenv("SMTP_SENDER","noreply@example.com"),
+            os.getenv("SUBMIT_EMAIL_TO","demo@example.com"),
+            f"D365 Export {logical} ({ts})",
+            filename, content, *mime
+        )
+    else:
+        location = upload_zip_via_sftp(
+            os.getenv("SFTP_HOST","localhost"),
+            int(os.getenv("SFTP_PORT","22")),
+            os.getenv("SFTP_USER","user"),
+            os.getenv("SFTP_PASSWORD","pass"),
+            f"/inbound/{tenant_id}/exports/{filename}",
+            content,
+        )
 
-    return {"ok": True, "format": format, "count": len(rows), "location": location, "file": filename}
+    return {"ok": True, "format": fmt, "count": len(rows), "location": location, "file": filename}
 
 
 

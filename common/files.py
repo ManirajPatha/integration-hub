@@ -1,3 +1,4 @@
+import csv
 import io
 import os
 from pathlib import Path
@@ -35,6 +36,24 @@ def build_submission_zip(answers: dict, attachments: Iterable[dict]) -> bytes:
                 z.writestr(f"attachments/{name}", base64.b64decode(att["content_base64"]))
             # If only URL provided, you can later add a downloader/streamer here
     return buf.getvalue()
+
+def save_rows_csv(rows: list[dict], tenant_id: str, logical: str) -> str:
+    base = os.getenv("SUBMISSION_DIR") or tempfile.gettempdir()
+    out_dir = Path(base) / tenant_id / "exports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # columns = union of keys across rows
+    cols = sorted({k for r in rows for k in r.keys()})
+    out = out_dir / f"{logical}.csv"
+
+    with out.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    return str(out)
+
 
 
 def save_zip_local(content: bytes, tenant_id: str, package_id: str) -> str:
@@ -133,6 +152,19 @@ def save_bytes_local(content: bytes, tenant_id: str, filename: str) -> str:
     base = os.getenv("SUBMISSION_DIR") or tempfile.gettempdir()
     out_dir = Path(base) / tenant_id / "exports"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / filename
-    out.write_bytes(content)
-    return f"local:{out}"
+    path = out_dir / filename
+    path.write_bytes(content)
+    return f"local:{path}"
+
+def send_bytes_via_email(host: str, port: int, sender: str, to: str,
+                         subject: str, filename: str,
+                         content: bytes, maintype: str, subtype: str) -> str:
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content("Export file attached.")
+    msg.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
+    with smtplib.SMTP(host, port) as s:
+        s.send_message(msg)
+    return f"email:sent:{to}"

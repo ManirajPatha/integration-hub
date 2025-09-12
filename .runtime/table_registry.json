@@ -1,13 +1,7 @@
 {
   "7b8a2d04-cb17-4f11-b872-6cb12230dde0": [
-    "account",
-    "cr83d_company",
     "cr83d_employee",
     "cr83d_school",
-    "cr83d_sourcingevent"
-  ],
-  "demo": [
-    "cr83d_company",
     "cr83d_sourcingevent"
   ]
 }
