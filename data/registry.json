@@ -4,5 +4,8 @@
     "cr83d_employee",
     "cr83d_school",
     "cr83d_sourcingevent"
+  ],
+  "demo": [
+    "cr83d_sourcingevent"
   ]
 }
